@@ -49,7 +49,17 @@ def log(msg):
 
 def fetch() -> tuple[bytes, str]:
     """Returns (file_bytes, 'pdf' or 'png')."""
-    base = f"{SERVER}/api/{API_VERSION}"
+    # Ask the server for the newest API version it supports — the custom-view
+    # PDF endpoint only exists in recent versions.
+    api_ver = API_VERSION
+    try:
+        info = requests.get(f"{SERVER}/api/{API_VERSION}/serverinfo",
+                            headers={"Accept": "application/json"}, timeout=30).json()
+        api_ver = info["serverInfo"]["restApiVersion"]
+    except Exception:
+        pass
+    log(f"Using API version {api_ver}")
+    base = f"{SERVER}/api/{api_ver}"
     s = requests.Session()
     s.headers["Accept"] = "application/json"
 
