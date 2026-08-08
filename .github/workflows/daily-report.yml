@@ -1,0 +1,33 @@
+name: Daily Rep Report
+
+on:
+  schedule:
+    # GitHub cron is UTC. 14:00 UTC = 7:00 AM Pacific (PDT).
+    # Winter (PST) that becomes 6:00 AM — change to 15 if you care.
+    - cron: "0 14 * * 1-5"
+  workflow_dispatch: {}   # adds a "Run workflow" button for manual testing
+
+jobs:
+  send-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Pull PDF and email it
+        env:
+          TABLEAU_SERVER: ${{ secrets.TABLEAU_SERVER }}
+          TABLEAU_SITE: ${{ secrets.TABLEAU_SITE }}
+          TABLEAU_PAT_NAME: ${{ secrets.TABLEAU_PAT_NAME }}
+          TABLEAU_PAT_SECRET: ${{ secrets.TABLEAU_PAT_SECRET }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python pull_and_email.py
