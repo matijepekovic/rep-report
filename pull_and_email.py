@@ -31,6 +31,10 @@ VIEW_NAME = "Rep Totals"
 # PDF options — Unspecified sizes the page to fit the whole view (kills the ###)
 PDF_TYPE = "Unspecified"
 PDF_ORIENTATION = "Landscape"
+# Render at the same pixel size as your screen view (from your embed code).
+# If columns are still tight, raise VIZ_WIDTH to 2400 or 3000.
+VIZ_WIDTH = 1800
+VIZ_HEIGHT = 917
 
 VIEW_FILTERS = {
     "Lead Branch": "WA-OLY",
@@ -93,7 +97,8 @@ def fetch_pdf() -> bytes:
         sys.exit(1)
     log(f"Found view: {target['name']}")
 
-    params = {"type": PDF_TYPE, "orientation": PDF_ORIENTATION, "maxAge": "1"}
+    params = {"type": PDF_TYPE, "orientation": PDF_ORIENTATION, "maxAge": "1",
+              "vizWidth": str(VIZ_WIDTH), "vizHeight": str(VIZ_HEIGHT)}
     for field, value in VIEW_FILTERS.items():
         params[f"vf_{field}"] = value
     r = s.get(f"{base}/sites/{site_id}/views/{target['id']}/pdf", params=params)
