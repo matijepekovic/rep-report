@@ -232,10 +232,15 @@ def rows_to_board(csv_text: str):
 
     # acc[name][field] = [sum, count]; the CSV may hold many rows per rep
     # (lead-level detail), so measures accumulate instead of overwrite.
+    # The export can repeat the same (lead, rep, measure) row — e.g. the viz
+    # fanning a lead out over both sales-rep fields — which doubles every
+    # number, so rows are deduped on that key before summing.
+    lead_col = next((h for h, n in hmap.items() if n == "leadid"), None)
     acc = {}
     order = []
     measure_seen = {}   # raw measure name -> (row count, mapped field)
-    n_rows = 0
+    seen_keys = {}      # (rep, lead, measure) -> occurrences
+    n_rows = n_dupes = 0
     for row in reader:
         n_rows += 1
         name = (row.get(rep_col) or "").strip()
@@ -258,6 +263,13 @@ def rows_to_board(csv_text: str):
             field = match_field(norm(mname))
             cnt, _ = measure_seen.get(mname, (0, field))
             measure_seen[mname] = (cnt + 1, field)
+            lead = (row.get(lead_col) or "").strip() if lead_col else ""
+            if lead:                      # dedupe repeated lead rows exactly
+                key = (name, lead, mname)
+                seen_keys[key] = seen_keys.get(key, 0) + 1
+                if seen_keys[key] > 1:
+                    n_dupes += 1
+                    continue
             if field:
                 feed(field, row.get(mv_col))
         else:
@@ -267,7 +279,12 @@ def rows_to_board(csv_text: str):
                     feed(field, row.get(h))
 
     if long_fmt:
-        log(f"{n_rows} rows. Distinct Measure Names -> mapped field:")
+        log(f"{n_rows} rows, {n_dupes} duplicate (rep,lead,measure) rows dropped.")
+        if seen_keys:
+            from collections import Counter
+            hist = Counter(seen_keys.values())
+            log(f"Rows-per-key histogram: {dict(sorted(hist.items()))}")
+        log("Distinct Measure Names -> mapped field:")
         for mname, (cnt, field) in sorted(measure_seen.items()):
             log(f"  - '{mname}' x{cnt} -> {field or 'UNMAPPED'}")
 
