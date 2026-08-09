@@ -186,29 +186,38 @@ def fetch_view_csv(s, base, site_id) -> str:
         k, v = pair.split("=", 1)
         params[f"vf_{k.strip()}"] = v.strip()
 
-    # Find the aggregated totals sheet in the same workbook — that is the
-    # data source for the board. The details sheet is never used.
-    r = s.get(f"{base}/sites/{site_id}/views/{view_id}")
-    r.raise_for_status()
-    wb_id = r.json()["view"]["workbook"]["id"]
-    r = s.get(f"{base}/sites/{site_id}/workbooks/{wb_id}/views", params={"pageSize": 200})
-    r.raise_for_status()
-    views = r.json().get("views", {}).get("view", [])
-    log("Workbook sheets: " + ", ".join(f"'{v['name']}'" for v in views))
-    want = norm(TARGET_SHEET)
-    totals_view = next((v for v in views if norm(v["name"]) == want), None) or \
-        next((v for v in views if want in norm(v["name"]) or "total" in norm(v["name"])), None)
-    if not totals_view:
-        log(f"No sheet matching '{TARGET_SHEET}' found in the workbook.")
-        sys.exit(1)
-    log(f"Pulling data from sheet '{totals_view['name']}' ({totals_view['id']})")
+    # Pull the sheet AS DISPLAYED via the crosstab endpoint — one row per
+    # rep with every column already aggregated by Tableau. The /data
+    # endpoint is useless here: it returns lead-level underlying rows.
+    # Prefer the custom view's crosstab (saved filters) when the server
+    # supports it; fall back to the underlying view's crosstab.
+    for label, url in (
+            ("custom view", f"{base}/sites/{site_id}/customviews/{cv['id']}/crosstab/excel"),
+            ("view", f"{base}/sites/{site_id}/views/{view_id}/crosstab/excel")):
+        r = s.get(url, params={**params, "maxAge": "1"})
+        if r.status_code == 200:
+            log(f"Got {label} crosstab xlsx ({len(r.content)//1024} KB)")
+            return crosstab_to_csv(r.content)
+        log(f"{label} crosstab unavailable ({r.status_code})")
+    log("No crosstab endpoint worked; cannot pull the totals table.")
+    sys.exit(1)
 
-    r = s.get(f"{base}/sites/{site_id}/views/{totals_view['id']}/data", params=params)
-    if r.status_code != 200:
-        log(f"Data pull failed ({r.status_code}): {r.text[:300]}")
-        sys.exit(1)
-    log(f"Got sheet data CSV ({len(r.content)//1024} KB)")
-    return r.content.decode("utf-8-sig")
+
+def crosstab_to_csv(xlsx_bytes: bytes) -> str:
+    """Flatten the crosstab workbook into CSV text, starting at the header
+    row (the one containing the rep-name column)."""
+    import io as _io
+    from openpyxl import load_workbook
+    wb = load_workbook(_io.BytesIO(xlsx_bytes), read_only=True, data_only=True)
+    ws = wb.worksheets[0]
+    rows = [["" if c is None else str(c) for c in row]
+            for row in ws.iter_rows(values_only=True)]
+    wb.close()
+    hdr = next((i for i, row in enumerate(rows)
+                if any(norm(c) in REP_ALIASES for c in row)), 0)
+    out = _io.StringIO()
+    csv.writer(out).writerows(rows[hdr:])
+    return out.getvalue()
 
 
 # ---------------------------------------------------------------- Mapping
