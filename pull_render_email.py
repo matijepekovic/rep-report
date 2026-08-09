@@ -42,6 +42,10 @@ PAT_SECRET = os.getenv("TABLEAU_PAT_SECRET", "PASTE_TOKEN_SECRET_HERE")
 
 CUSTOM_VIEW_NAME = os.getenv("CUSTOM_VIEW_NAME", "UNDISPUTED")
 
+# The dashboard sheet holding the aggregated per-rep table. The bot pulls
+# THIS sheet's data — the lead-level details sheet is irrelevant.
+TARGET_SHEET = os.getenv("TARGET_SHEET", "Sales Rep Totals")
+
 # Optional view filters for the data query, e.g. "Region=West;Week=Last"
 # (applied as vf_<field>=<value> query params).
 VIZ_FILTERS = os.getenv("TABLEAU_VIZ_FILTERS", "")
@@ -75,7 +79,7 @@ EMAIL_SUBJECT = os.getenv("EMAIL_SUBJECT", "UNDISPUTED Leaderboard")
 FIELD_ALIASES = {
     "issuedLeads":    ["issuedleads", "leadsissued", "issued"],
     "pitchedLeads":   ["pitchedleads", "leadspitched", "pitched"],
-    "pitchRate":      ["pitchrate", "pitchpct", "pitchpercent"],
+    "pitchRate":      ["pitchedrate", "pitchrate", "pitchpct", "pitchpercent"],
     "soldLeads":      ["soldleads", "leadssold", "sold"],
     "closeRate":      ["closerate", "closingrate", "closepct", "closepercent"],
     "grossSplit":     ["grosssplit", "grosssales", "grossvolume", "gross"],
@@ -83,8 +87,8 @@ FIELD_ALIASES = {
     "pendingSplit":   ["pendingsplit", "pending"],
     "dpl":            ["dollarsperlead", "dpl", "perlead"],
     "salesRetention": ["salesretention", "retentionrate", "retention"],
-    "avgGrossPerRep": ["avggrossperrep", "averagegrossperrep", "avggross"],
-    "avgNetPerRep":   ["avgnetperrep", "averagenetperrep", "avgnet"],
+    "avgGrossPerRep": ["avggrosssaleperrep", "avggrossperrep", "averagegrossperrep", "avggross"],
+    "avgNetPerRep":   ["avgnetsaleperrep", "avgnetperrep", "averagenetperrep", "avgnet"],
 }
 # (alias, field) pairs, longest alias first, so specific names win
 ALIAS_INDEX = sorted(
@@ -182,21 +186,28 @@ def fetch_view_csv(s, base, site_id) -> str:
         k, v = pair.split("=", 1)
         params[f"vf_{k.strip()}"] = v.strip()
 
-    # Prefer the custom view's own data (carries its saved filter state) if
-    # this server version exposes the endpoint; fall back to the underlying
-    # view otherwise.
-    r = s.get(f"{base}/sites/{site_id}/customviews/{cv['id']}/data", params=params)
-    if r.status_code == 200:
-        log(f"Got CUSTOM VIEW data CSV ({len(r.content)//1024} KB)")
-        return r.content.decode("utf-8-sig")
-    log(f"Custom-view data endpoint unavailable ({r.status_code}); "
-        "falling back to underlying view (saved filters may not apply).")
+    # Find the aggregated totals sheet in the same workbook — that is the
+    # data source for the board. The details sheet is never used.
+    r = s.get(f"{base}/sites/{site_id}/views/{view_id}")
+    r.raise_for_status()
+    wb_id = r.json()["view"]["workbook"]["id"]
+    r = s.get(f"{base}/sites/{site_id}/workbooks/{wb_id}/views", params={"pageSize": 200})
+    r.raise_for_status()
+    views = r.json().get("views", {}).get("view", [])
+    log("Workbook sheets: " + ", ".join(f"'{v['name']}'" for v in views))
+    want = norm(TARGET_SHEET)
+    totals_view = next((v for v in views if norm(v["name"]) == want), None) or \
+        next((v for v in views if want in norm(v["name"]) or "total" in norm(v["name"])), None)
+    if not totals_view:
+        log(f"No sheet matching '{TARGET_SHEET}' found in the workbook.")
+        sys.exit(1)
+    log(f"Pulling data from sheet '{totals_view['name']}' ({totals_view['id']})")
 
-    r = s.get(f"{base}/sites/{site_id}/views/{view_id}/data", params=params)
+    r = s.get(f"{base}/sites/{site_id}/views/{totals_view['id']}/data", params=params)
     if r.status_code != 200:
         log(f"Data pull failed ({r.status_code}): {r.text[:300]}")
         sys.exit(1)
-    log(f"Got view data CSV ({len(r.content)//1024} KB)")
+    log(f"Got sheet data CSV ({len(r.content)//1024} KB)")
     return r.content.decode("utf-8-sig")
 
 
@@ -331,23 +342,27 @@ def rows_to_board(csv_text: str):
 
 
 def derive(r):
-    """Fill computed columns in-place (rep row or totals row)."""
+    """Fill MISSING computed columns in-place (rep row or totals row).
+    Values that came straight from the Tableau sheet are never overwritten."""
+    def put(key, val):
+        if r.get(key) is None:
+            r[key] = val
     issued, pitched = r.get("issuedLeads"), r.get("pitchedLeads")
     sold = r.get("soldLeads")
     gross, net = r.get("grossSplit"), r.get("netSplit")
     if issued and pitched is not None:
-        r["pitchRate"] = pitched / issued
+        put("pitchRate", pitched / issued)
     if issued and sold is not None:
-        r["closeRate"] = sold / issued
+        put("closeRate", sold / issued)
     if issued and net is not None:
-        r["dpl"] = net / issued
+        put("dpl", net / issued)
     if gross and net is not None:
-        r["salesRetention"] = net / gross
+        put("salesRetention", net / gross)
     if sold:
         if gross is not None:
-            r["avgGrossPerRep"] = gross / sold
+            put("avgGrossPerRep", gross / sold)
         if net is not None:
-            r["avgNetPerRep"] = net / sold
+            put("avgNetPerRep", net / sold)
 
 
 def compute_totals(rep_list):
