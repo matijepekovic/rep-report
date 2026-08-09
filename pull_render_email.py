@@ -42,9 +42,11 @@ PAT_SECRET = os.getenv("TABLEAU_PAT_SECRET", "PASTE_TOKEN_SECRET_HERE")
 
 CUSTOM_VIEW_NAME = os.getenv("CUSTOM_VIEW_NAME", "UNDISPUTED")
 
-# The dashboard sheet holding the aggregated per-rep table. The bot pulls
-# THIS sheet's data — the lead-level details sheet is irrelevant.
-TARGET_SHEET = os.getenv("TARGET_SHEET", "Sales Rep Totals")
+# The workbook's "Split" measures display each detail row at raw/2 (rep
+# splits), so raw sums come out at exactly twice the Sales Rep Totals
+# table. Dividing by this reproduces the report's numbers to the cent
+# (verified against the PDF export).
+SPLIT_DIVISOR = float(os.getenv("SPLIT_DIVISOR", "2"))
 
 # Optional view filters for the data query, e.g. "Region=West;Week=Last"
 # (applied as vf_<field>=<value> query params).
@@ -186,73 +188,23 @@ def fetch_view_csv(s, base, site_id) -> str:
         k, v = pair.split("=", 1)
         params[f"vf_{k.strip()}"] = v.strip()
 
-    # Numbers come from the Rep Totals table AS DISPLAYED, via the crosstab
-    # endpoint — one row per rep, every column aggregated by Tableau. The
-    # default view is unfiltered (whole company), so the custom view's DATA
-    # export (which does honor the saved filters) is used only to learn
-    # WHICH reps belong on the board — never for numbers.
-    allowed = set()
+    # The custom view's data export is the one source that honors the saved
+    # filters. It is lead-level; sums get divided by SPLIT_DIVISOR to match
+    # the Sales Rep Totals table exactly. (The totals worksheet itself is
+    # not published as a view, so it cannot be fetched directly.)
     r = s.get(f"{base}/sites/{site_id}/customviews/{cv['id']}/data",
-              params={"maxAge": "1"})
-    if r.status_code == 200:
-        allowed = rep_names_in_csv(r.content.decode("utf-8-sig"))
-        log(f"Custom view scope: {len(allowed)} reps -> {sorted(allowed)}")
-    else:
-        log(f"Custom-view data unavailable ({r.status_code}); board will "
-            "include every rep in the crosstab.")
-
-    r = s.get(f"{base}/sites/{site_id}/views/{view_id}/crosstab/excel",
               params={**params, "maxAge": "1"})
+    if r.status_code == 200:
+        log(f"Got custom view data CSV ({len(r.content)//1024} KB)")
+        return r.content.decode("utf-8-sig")
+    log(f"Custom-view data unavailable ({r.status_code}); "
+        "falling back to underlying view (saved filters may not apply).")
+    r = s.get(f"{base}/sites/{site_id}/views/{view_id}/data", params=params)
     if r.status_code != 200:
-        log(f"Crosstab pull failed ({r.status_code}): {r.text[:300]}")
+        log(f"Data pull failed ({r.status_code}): {r.text[:300]}")
         sys.exit(1)
-    log(f"Got crosstab xlsx ({len(r.content)//1024} KB)")
-    return crosstab_to_csv(r.content), allowed
-
-
-def rep_names_in_csv(csv_text: str) -> set:
-    reader = csv.DictReader(io.StringIO(csv_text))
-    rep_col = next((h for h in (reader.fieldnames or [])
-                    if norm(h) in REP_ALIASES), None)
-    if not rep_col:
-        return set()
-    return {(row.get(rep_col) or "").strip()
-            for row in reader if (row.get(rep_col) or "").strip()}
-
-
-def crosstab_to_csv(xlsx_bytes: bytes) -> str:
-    """Pick the aggregated totals worksheet out of the crosstab workbook
-    (a dashboard exports one worksheet per table) and flatten it to CSV."""
-    import io as _io
-    from openpyxl import load_workbook
-    wb = load_workbook(_io.BytesIO(xlsx_bytes), read_only=True, data_only=True)
-    log("Crosstab worksheets: " + ", ".join(f"'{w.title}'" for w in wb.worksheets))
-
-    def sheet_rows(ws):
-        return [["" if c is None else str(c) for c in row]
-                for row in ws.iter_rows(values_only=True)]
-
-    best = None
-    for ws in wb.worksheets:
-        rows = sheet_rows(ws)
-        hdr = next((i for i, row in enumerate(rows)
-                    if any(norm(c) in REP_ALIASES for c in row)), None)
-        if hdr is None:
-            continue
-        header_norms = [norm(c) for c in rows[hdr]]
-        # the aggregated table is the one carrying computed columns like DPL
-        score = sum(1 for n in header_norms
-                    if any(k in n for k in ("dpl", "retention", "avggross", "avgnet")))
-        if best is None or score > best[0]:
-            best = (score, ws.title, rows[hdr:])
-    wb.close()
-    if best is None:
-        log("No worksheet with a rep column found in the crosstab.")
-        sys.exit(1)
-    log(f"Using worksheet '{best[1]}' (computed-column score {best[0]})")
-    out = _io.StringIO()
-    csv.writer(out).writerows(best[2])
-    return out.getvalue()
+    log(f"Got view data CSV ({len(r.content)//1024} KB)")
+    return r.content.decode("utf-8-sig")
 
 
 # ---------------------------------------------------------------- Mapping
@@ -268,7 +220,7 @@ def match_field(header_norm):
     return None
 
 
-def rows_to_board(csv_text: str, allowed: set = None):
+def rows_to_board(csv_text: str):
     reader = csv.DictReader(io.StringIO(csv_text))
     headers = reader.fieldnames or []
     log(f"CSV headers: {headers}")
@@ -285,17 +237,12 @@ def rows_to_board(csv_text: str, allowed: set = None):
     log(f"Rep column: '{rep_col}'  Branch column: '{branch_col}'  "
         f"Long format: {long_fmt}")
 
-    # acc[name][field] = [sum, count]; the CSV may hold many rows per rep
+    # acc[name][field] = [sum, count]; the CSV holds many rows per rep
     # (lead-level detail), so measures accumulate instead of overwrite.
-    # The export can repeat the same (lead, rep, measure) row — e.g. the viz
-    # fanning a lead out over both sales-rep fields — which doubles every
-    # number, so rows are deduped on that key before summing.
-    lead_col = next((h for h, n in hmap.items() if n == "leadid"), None)
     acc = {}
     order = []
     measure_seen = {}   # raw measure name -> (row count, mapped field)
-    seen_keys = {}      # (rep, lead, measure) -> occurrences
-    n_rows = n_dupes = 0
+    n_rows = 0
     for row in reader:
         n_rows += 1
         name = (row.get(rep_col) or "").strip()
@@ -318,13 +265,6 @@ def rows_to_board(csv_text: str, allowed: set = None):
             field = match_field(norm(mname))
             cnt, _ = measure_seen.get(mname, (0, field))
             measure_seen[mname] = (cnt + 1, field)
-            lead = (row.get(lead_col) or "").strip() if lead_col else ""
-            if lead:                      # dedupe repeated lead rows exactly
-                key = (name, lead, mname)
-                seen_keys[key] = seen_keys.get(key, 0) + 1
-                if seen_keys[key] > 1:
-                    n_dupes += 1
-                    continue
             if field:
                 feed(field, row.get(mv_col))
         else:
@@ -334,22 +274,24 @@ def rows_to_board(csv_text: str, allowed: set = None):
                     feed(field, row.get(h))
 
     if long_fmt:
-        log(f"{n_rows} rows, {n_dupes} duplicate (rep,lead,measure) rows dropped.")
-        if seen_keys:
-            from collections import Counter
-            hist = Counter(seen_keys.values())
-            log(f"Rows-per-key histogram: {dict(sorted(hist.items()))}")
-        log("Distinct Measure Names -> mapped field:")
+        log(f"{n_rows} rows. Distinct Measure Names -> mapped field:")
         for mname, (cnt, field) in sorted(measure_seen.items()):
             log(f"  - '{mname}' x{cnt} -> {field or 'UNMAPPED'}")
 
     # Collapse accumulators: sums for counts/dollars, means for rates & avgs.
-    # Board shows rep name only — no branch.
+    # Raw lead-level sums are divided by SPLIT_DIVISOR to match the Sales
+    # Rep Totals table. Board shows rep name only — no branch.
+    scale = SPLIT_DIVISOR if (long_fmt and SPLIT_DIVISOR) else 1.0
+    if scale != 1.0:
+        log(f"Applying split divisor {scale} to summed measures.")
     reps = {}
     for name in order:
         rec = {"name": name}
         for field, (total, count) in acc[name].items():
-            rec[field] = (total / count) if field in MEAN_FIELDS and count else total
+            if field in MEAN_FIELDS and count:
+                rec[field] = total / count
+            else:
+                rec[field] = total / scale
         reps[name] = rec
 
     # Split out a totals row if Tableau included one
@@ -363,16 +305,6 @@ def rows_to_board(csv_text: str, allowed: set = None):
             order.remove(name)
 
     rep_list = [reps[n] for n in order]
-
-    # Keep only the reps the custom view shows; totals are then recomputed
-    # from the kept rows (the crosstab's Grand Total spans the whole company).
-    if allowed:
-        allowed_lc = {a.strip().lower() for a in allowed}
-        before = len(rep_list)
-        rep_list = [r for r in rep_list if r["name"].strip().lower() in allowed_lc]
-        log(f"Scope filter: kept {len(rep_list)} of {before} reps")
-        totals = None
-
     if not rep_list:
         log("No rep rows parsed — check the header mapping above.")
         sys.exit(1)
@@ -501,11 +433,11 @@ def send_email(png: Path):
 
 if __name__ == "__main__":
     s, base, site_id = tableau_signin()
-    csv_text, allowed = fetch_view_csv(s, base, site_id)
+    csv_text = fetch_view_csv(s, base, site_id)
     Path("view_data.csv").write_text(csv_text)
     s.post(f"{base}/auth/signout")
 
-    rep_list, totals = rows_to_board(csv_text, allowed)
+    rep_list, totals = rows_to_board(csv_text)
     data = {
         "dateRange": REPORT_RANGE or default_range(),
         "reps": rep_list,
