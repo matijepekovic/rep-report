@@ -248,6 +248,7 @@ def rows_to_board(csv_text: str):
     acc_tot = {}    # per-rep totals:  name -> field -> [sum, count]
     order = []
     measure_seen = {}   # raw measure name -> (row count, mapped field)
+    raw_seen = {}       # dry-run diagnostic: field -> rep -> (lead, job, value)
     n_rows = 0
     for row in reader:
         n_rows += 1
@@ -277,6 +278,12 @@ def rows_to_board(csv_text: str):
             cnt, _ = measure_seen.get(mname, (0, field))
             measure_seen[mname] = (cnt + 1, field)
             if field:
+                if DRY_RUN and field in ("soldLeads", "issuedLeads", "grossSplit"):
+                    lead = (row.get(lead_col) or "")[-5:]
+                    job = next((row.get(h) or "" for h, n in hmap.items()
+                                if "jobnumber" in n), "")
+                    raw_seen.setdefault(field, {}).setdefault(name, []).append(
+                        (lead, job.strip()[:12], str(row.get(mv_col)).strip()))
                 feed(field, row.get(mv_col))
         else:
             for h, n in hmap.items():
@@ -288,6 +295,9 @@ def rows_to_board(csv_text: str):
         log(f"{n_rows} rows. Distinct Measure Names -> mapped field:")
         for mname, (cnt, field) in sorted(measure_seen.items()):
             log(f"  - '{mname}' x{cnt} -> {field or 'UNMAPPED'}")
+        for field, per_rep in sorted(raw_seen.items()):
+            for rep, vals in sorted(per_rep.items()):
+                log(f"  RAW {field} {rep}: {vals}")
 
     # Collapse: prefer the rep's Total-row value; fall back to per-lead sum
     # divided by SPLIT_DIVISOR. Board shows rep name only — no branch.
