@@ -73,26 +73,33 @@ EMAIL_SUBJECT = os.getenv("EMAIL_SUBJECT", "UNDISPUTED Leaderboard")
 # Adjust the alias lists if the first run's logged headers differ.
 
 FIELD_ALIASES = {
-    "issuedLeads":    ["issuedleads", "issued", "leadsissued", "leads"],
-    "pitchedLeads":   ["pitchedleads", "pitched", "leadspitched"],
+    "issuedLeads":    ["issuedleads", "leadsissued", "issued"],
+    "pitchedLeads":   ["pitchedleads", "leadspitched", "pitched"],
     "pitchRate":      ["pitchrate", "pitchpct", "pitchpercent"],
-    "soldLeads":      ["soldleads", "sold", "sales", "leadssold"],
-    "closeRate":      ["closerate", "closepct", "closingrate", "closepercent"],
-    "grossSplit":     ["grosssplit", "gross", "grosssales", "grossvolume"],
-    "netSplit":       ["netsplit", "net", "netsales", "netvolume"],
-    "dpl":            ["dpl", "dollarsperlead", "perlead"],
-    "salesRetention": ["salesretention", "retention", "retentionrate"],
-    "avgGrossPerRep": ["avggrossperrep", "avggross", "averagegrossperrep"],
-    "avgNetPerRep":   ["avgnetperrep", "avgnet", "averagenetperrep"],
+    "soldLeads":      ["soldleads", "leadssold", "sold"],
+    "closeRate":      ["closerate", "closingrate", "closepct", "closepercent"],
+    "grossSplit":     ["grosssplit", "grosssales", "grossvolume", "gross"],
+    "netSplit":       ["netsplit", "netsales", "netvolume"],
+    "dpl":            ["dollarsperlead", "dpl", "perlead"],
+    "salesRetention": ["salesretention", "retentionrate", "retention"],
+    "avgGrossPerRep": ["avggrossperrep", "averagegrossperrep", "avggross"],
+    "avgNetPerRep":   ["avgnetperrep", "averagenetperrep", "avgnet"],
 }
-REP_ALIASES = ["rep", "repname", "salesrep", "salesperson", "name", "employee",
-               "assignedrep", "repbranch"]
-BRANCH_ALIASES = ["branch", "office", "location", "market", "team"]
+# (alias, field) pairs, longest alias first, so specific names win
+ALIAS_INDEX = sorted(
+    ((a, f) for f, aliases in FIELD_ALIASES.items() for a in aliases),
+    key=lambda p: -len(p[0]))
+
+REP_ALIASES = ["srname", "rep", "repname", "salesrep", "salesperson",
+               "employee", "assignedrep"]
+BRANCH_ALIASES = ["branchnew", "branch", "office", "location", "market"]
 MEASURE_NAME_COLS = ["measurenames", "measure"]
 MEASURE_VALUE_COLS = ["measurevalues", "value"]
 TOTAL_ROW_NAMES = {"grand total", "total", "totals", "team total", "team totals"}
 
 PCT_FIELDS = {"pitchRate", "closeRate", "salesRetention"}
+# aggregated as mean over rows; everything else sums
+MEAN_FIELDS = PCT_FIELDS | {"dpl", "avgGrossPerRep", "avgNetPerRep"}
 
 
 def log(msg):
@@ -185,8 +192,12 @@ def fetch_view_csv(s, base, site_id) -> str:
 # ---------------------------------------------------------------- Mapping
 
 def match_field(header_norm):
-    for field, aliases in FIELD_ALIASES.items():
-        if header_norm in aliases:
+    """Longest-alias-first substring match, so e.g. 'AGG(Pitch Rate)' or
+    'SUM(Net Split)' still resolve to the right field."""
+    if not header_norm:
+        return None
+    for alias, field in ALIAS_INDEX:
+        if alias in header_norm:
             return field
     return None
 
@@ -204,29 +215,61 @@ def rows_to_board(csv_text: str):
     if not rep_col:
         log("No rep-name column recognized. Add its header to REP_ALIASES.")
         sys.exit(1)
+    long_fmt = bool(mn_col and mv_col)
     log(f"Rep column: '{rep_col}'  Branch column: '{branch_col}'  "
-        f"Long format: {bool(mn_col and mv_col)}")
+        f"Long format: {long_fmt}")
 
-    reps = {}   # name -> dict
+    # acc[name][field] = [sum, count]; the CSV may hold many rows per rep
+    # (lead-level detail), so measures accumulate instead of overwrite.
+    acc = {}
+    branches = {}
     order = []
+    measure_seen = {}   # raw measure name -> (row count, mapped field)
+    n_rows = 0
     for row in reader:
+        n_rows += 1
         name = (row.get(rep_col) or "").strip()
         if not name:
             continue
-        rec = reps.setdefault(name, {"name": name})
-        if name not in order:
+        if name not in acc:
+            acc[name] = {}
             order.append(name)
-        if branch_col and row.get(branch_col):
-            rec["branch"] = row[branch_col].strip()
-        if mn_col and mv_col:                      # long format: one measure per row
-            field = match_field(norm(row.get(mn_col, "")))
+        if branch_col and (row.get(branch_col) or "").strip():
+            branches[name] = row[branch_col].strip()
+
+        def feed(field, raw):
+            v = clean_number(raw, field in PCT_FIELDS)
+            if v is None:
+                return
+            s = acc[name].setdefault(field, [0.0, 0])
+            s[0] += v
+            s[1] += 1
+
+        if long_fmt:
+            mname = (row.get(mn_col) or "").strip()
+            field = match_field(norm(mname))
+            cnt, _ = measure_seen.get(mname, (0, field))
+            measure_seen[mname] = (cnt + 1, field)
             if field:
-                rec[field] = clean_number(row.get(mv_col), field in PCT_FIELDS)
-        else:                                       # wide format: measures as columns
+                feed(field, row.get(mv_col))
+        else:
             for h, n in hmap.items():
                 field = match_field(n)
                 if field:
-                    rec[field] = clean_number(row.get(h), field in PCT_FIELDS)
+                    feed(field, row.get(h))
+
+    if long_fmt:
+        log(f"{n_rows} rows. Distinct Measure Names -> mapped field:")
+        for mname, (cnt, field) in sorted(measure_seen.items()):
+            log(f"  - '{mname}' x{cnt} -> {field or 'UNMAPPED'}")
+
+    # Collapse accumulators: sums for counts/dollars, means for rates & avgs.
+    reps = {}
+    for name in order:
+        rec = {"name": name, "branch": branches.get(name)}
+        for field, (total, count) in acc[name].items():
+            rec[field] = (total / count) if field in MEAN_FIELDS and count else total
+        reps[name] = rec
 
     # Split out a totals row if Tableau included one
     totals = None
@@ -242,12 +285,22 @@ def rows_to_board(csv_text: str):
         log("No rep rows parsed — check the header mapping above.")
         sys.exit(1)
 
+    # Recompute rates from summed counts when possible (more accurate than
+    # averaging per-row rates).
+    for r in rep_list:
+        if r.get("issuedLeads") and r.get("pitchedLeads") is not None:
+            r["pitchRate"] = r["pitchedLeads"] / r["issuedLeads"]
+        if r.get("pitchedLeads") and r.get("soldLeads") is not None:
+            r["closeRate"] = r["soldLeads"] / r["pitchedLeads"]
+
     if totals is None:
         totals = compute_totals(rep_list)
         log("No total row in CSV; computed totals from rep rows.")
 
     log(f"Parsed {len(rep_list)} reps. Fields on first rep: "
         f"{sorted(k for k in rep_list[0] if k not in ('name', 'branch'))}")
+    for r in rep_list[:3]:
+        log(f"  sample: {r}")
     return rep_list, totals
 
 
