@@ -245,8 +245,9 @@ def rows_to_board(csv_text: str):
         if name not in acc:
             acc[name] = {}
             order.append(name)
-        if branch_col and (row.get(branch_col) or "").strip():
-            branches[name] = row[branch_col].strip()
+        bval = (row.get(branch_col) or "").strip() if branch_col else ""
+        if bval and bval.lower() != "all":   # 'All' is a filter artifact, not a branch
+            branches[name] = bval
 
         def feed(field, raw):
             v = clean_number(raw, field in PCT_FIELDS)
@@ -289,6 +290,7 @@ def rows_to_board(csv_text: str):
             totals = reps.pop(name)
             totals.pop("name", None)
             totals.pop("branch", None)
+            derive(totals)
             order.remove(name)
 
     rep_list = [reps[n] for n in order]
@@ -296,15 +298,12 @@ def rows_to_board(csv_text: str):
         log("No rep rows parsed — check the header mapping above.")
         sys.exit(1)
 
-    # Recompute rates from summed counts when possible (more accurate than
-    # averaging per-row rates). DPL = Net Split / Issued Leads.
+    # Derived columns, formulas verified against the Tableau PDF export:
+    #   Pitch Rate = Pitched/Issued        Close Rate = Sold/Issued
+    #   DPL = Net/Issued                   Sales Retention = Net/Gross
+    #   Avg Gross Sale per Rep = Gross/Sold   Avg Net Sale per Rep = Net/Sold
     for r in rep_list:
-        if r.get("issuedLeads") and r.get("pitchedLeads") is not None:
-            r["pitchRate"] = r["pitchedLeads"] / r["issuedLeads"]
-        if r.get("pitchedLeads") and r.get("soldLeads") is not None:
-            r["closeRate"] = r["soldLeads"] / r["pitchedLeads"]
-        if r.get("issuedLeads") and r.get("netSplit") is not None:
-            r["dpl"] = r["netSplit"] / r["issuedLeads"]
+        derive(r)
 
     if totals is None:
         totals = compute_totals(rep_list)
@@ -317,40 +316,45 @@ def rows_to_board(csv_text: str):
     return rep_list, totals
 
 
+def derive(r):
+    """Fill computed columns in-place (rep row or totals row)."""
+    issued, pitched = r.get("issuedLeads"), r.get("pitchedLeads")
+    sold = r.get("soldLeads")
+    gross, net = r.get("grossSplit"), r.get("netSplit")
+    if issued and pitched is not None:
+        r["pitchRate"] = pitched / issued
+    if issued and sold is not None:
+        r["closeRate"] = sold / issued
+    if issued and net is not None:
+        r["dpl"] = net / issued
+    if gross and net is not None:
+        r["salesRetention"] = net / gross
+    if sold:
+        if gross is not None:
+            r["avgGrossPerRep"] = gross / sold
+        if net is not None:
+            r["avgNetPerRep"] = net / sold
+
+
 def compute_totals(rep_list):
     def total(key):
         vals = [r.get(key) for r in rep_list if r.get(key) is not None]
         return sum(vals) if vals else None
 
-    def mean(key):
-        vals = [r.get(key) for r in rep_list if r.get(key) is not None]
-        return sum(vals) / len(vals) if vals else None
-
-    t = {
-        "issuedLeads": total("issuedLeads"),
-        "pitchedLeads": total("pitchedLeads"),
-        "soldLeads": total("soldLeads"),
-        "grossSplit": total("grossSplit"),
-        "netSplit": total("netSplit"),
-        "pendingSplit": total("pendingSplit"),
-        "salesRetention": mean("salesRetention"),
-    }
-    if t["issuedLeads"] and t["pitchedLeads"]:
-        t["pitchRate"] = t["pitchedLeads"] / t["issuedLeads"]
-    if t["pitchedLeads"] and t["soldLeads"]:
-        t["closeRate"] = t["soldLeads"] / t["pitchedLeads"]
-    if t["issuedLeads"] and t["netSplit"]:
-        t["dpl"] = t["netSplit"] / t["issuedLeads"]
+    t = {k: total(k) for k in
+         ("issuedLeads", "pitchedLeads", "soldLeads",
+          "grossSplit", "pendingSplit", "netSplit")}
+    derive(t)
     return t
 
 
 def default_range():
+    # The saved view covers the current month (e.g. 8/1 - 8/31).
     now = datetime.now()
-    mon = now - timedelta(days=now.weekday())
-    sun = mon + timedelta(days=6)
-    if mon.month == sun.month:
-        return f"{mon:%b %d} – {sun:%d, %Y}".upper()
-    return f"{mon:%b %d} – {sun:%b %d, %Y}".upper()
+    first = now.replace(day=1)
+    nxt = (first + timedelta(days=32)).replace(day=1)
+    last = nxt - timedelta(days=1)
+    return f"{first:%b %d} – {last:%b %d, %Y}".upper()
 
 
 # ---------------------------------------------------------------- Render
