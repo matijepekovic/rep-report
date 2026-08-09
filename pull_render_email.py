@@ -42,11 +42,11 @@ PAT_SECRET = os.getenv("TABLEAU_PAT_SECRET", "PASTE_TOKEN_SECRET_HERE")
 
 CUSTOM_VIEW_NAME = os.getenv("CUSTOM_VIEW_NAME", "UNDISPUTED")
 
-# The workbook's "Split" measures display each detail row at raw/2 (rep
-# splits), so raw sums come out at exactly twice the Sales Rep Totals
-# table. Dividing by this reproduces the report's numbers to the cent
-# (verified against the PDF export).
-SPLIT_DIVISOR = float(os.getenv("SPLIT_DIVISOR", "2"))
+# Lead-count measures are deduped per lead: a lead sold with N products
+# shows up as N job rows, each repeating the lead's split value, and
+# summing them over-counts. Dollar measures sum across job rows (each
+# product's money counts). Per-rep 'All' roll-up rows are skipped.
+COUNT_FIELDS = {"issuedLeads", "pitchedLeads", "soldLeads"}
 
 # Optional view filters for the data query, e.g. "Region=West;Week=Last"
 # (applied as vf_<field>=<value> query params).
@@ -239,17 +239,15 @@ def rows_to_board(csv_text: str):
 
     # acc[name][field] = [sum, count]; the CSV holds many rows per rep
     # (lead-level detail), so measures accumulate instead of overwrite.
-    # The export interleaves per-lead split rows WITH each rep's Total row
-    # (LEAD-Id is blank on it). Those Total rows are the Sales Rep Totals
-    # themselves, so they are the numbers used; per-lead rows only feed the
-    # divisor fallback in case a rep has no Total row.
+    # acc[name][field] is a dict lead->value for COUNT_FIELDS (a lead's
+    # split value is stored once no matter how many job rows repeat it)
+    # and [sum, count] for everything else (dollars sum across job rows).
+    # Per-rep 'All' roll-up rows are skipped entirely.
     lead_col = next((h for h, n in hmap.items() if n == "leadid"), None)
-    acc = {}        # per-lead rows:   name -> field -> [sum, count]
-    acc_tot = {}    # per-rep totals:  name -> field -> [sum, count]
+    acc = {}
     order = []
     measure_seen = {}   # raw measure name -> (row count, mapped field)
-    raw_seen = {}       # dry-run diagnostic: field -> rep -> (lead, job, value)
-    n_rows = 0
+    n_rows = n_skipped_all = 0
     for row in reader:
         n_rows += 1
         name = (row.get(rep_col) or "").strip()
@@ -257,20 +255,23 @@ def rows_to_board(csv_text: str):
             continue
         if name not in acc:
             acc[name] = {}
-            acc_tot[name] = {}
             order.append(name)
 
-        is_total_row = long_fmt and lead_col is not None \
-            and not (row.get(lead_col) or "").strip()
+        lead = (row.get(lead_col) or "").strip() if lead_col else ""
+        if long_fmt and lead.lower() == "all":   # per-rep roll-up row
+            n_skipped_all += 1
+            continue
 
         def feed(field, raw):
             v = clean_number(raw, field in PCT_FIELDS)
             if v is None:
                 return
-            bucket = acc_tot[name] if is_total_row else acc[name]
-            s = bucket.setdefault(field, [0.0, 0])
-            s[0] += v
-            s[1] += 1
+            if long_fmt and field in COUNT_FIELDS and lead:
+                acc[name].setdefault(field, {}).setdefault(lead, v)
+            else:
+                s = acc[name].setdefault(field, [0.0, 0])
+                s[0] += v
+                s[1] += 1
 
         if long_fmt:
             mname = (row.get(mn_col) or "").strip()
@@ -278,12 +279,6 @@ def rows_to_board(csv_text: str):
             cnt, _ = measure_seen.get(mname, (0, field))
             measure_seen[mname] = (cnt + 1, field)
             if field:
-                if DRY_RUN and field in ("soldLeads", "issuedLeads", "grossSplit"):
-                    lead = (row.get(lead_col) or "")[-5:]
-                    job = next((row.get(h) or "" for h, n in hmap.items()
-                                if "jobnumber" in n), "")
-                    raw_seen.setdefault(field, {}).setdefault(name, []).append(
-                        (lead, job.strip()[:12], str(row.get(mv_col)).strip()))
                 feed(field, row.get(mv_col))
         else:
             for h, n in hmap.items():
@@ -292,35 +287,23 @@ def rows_to_board(csv_text: str):
                     feed(field, row.get(h))
 
     if long_fmt:
-        log(f"{n_rows} rows. Distinct Measure Names -> mapped field:")
+        log(f"{n_rows} rows ({n_skipped_all} 'All' roll-up rows skipped). "
+            "Distinct Measure Names -> mapped field:")
         for mname, (cnt, field) in sorted(measure_seen.items()):
             log(f"  - '{mname}' x{cnt} -> {field or 'UNMAPPED'}")
-        for field, per_rep in sorted(raw_seen.items()):
-            for rep, vals in sorted(per_rep.items()):
-                log(f"  RAW {field} {rep}: {vals}")
 
-    # Collapse: prefer the rep's Total-row value; fall back to per-lead sum
-    # divided by SPLIT_DIVISOR. Board shows rep name only — no branch.
-    n_from_total = n_from_leads = 0
+    # Collapse: counts = one value per lead, summed; dollars = job-row sums;
+    # MEAN_FIELDS = mean. Board shows rep name only — no branch.
     reps = {}
     for name in order:
         rec = {"name": name}
-        for field in set(acc[name]) | set(acc_tot[name]):
-            if field in acc_tot[name]:
-                total, count = acc_tot[name][field]
-                rec[field] = (total / count) if field in MEAN_FIELDS and count else total
-                n_from_total += 1
+        for field, agg in acc[name].items():
+            if isinstance(agg, dict):                 # per-lead count values
+                rec[field] = sum(agg.values())
             else:
-                total, count = acc[name][field]
-                if field in MEAN_FIELDS and count:
-                    rec[field] = total / count
-                else:
-                    rec[field] = total / (SPLIT_DIVISOR or 1.0)
-                n_from_leads += 1
+                total, count = agg
+                rec[field] = (total / count) if field in MEAN_FIELDS and count else total
         reps[name] = rec
-    if long_fmt:
-        log(f"Values from Total rows: {n_from_total}; "
-            f"from lead rows (divisor fallback): {n_from_leads}")
 
     # Split out a totals row if Tableau included one
     totals = None
