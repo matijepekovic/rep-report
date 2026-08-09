@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+board.png
+view_data.csv
+rep_totals_latest.*
+stats-board/
