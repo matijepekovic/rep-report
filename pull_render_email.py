@@ -429,8 +429,7 @@ def send_email(png: Path):
     msg["Subject"] = f"{EMAIL_SUBJECT} — {today}"
     msg["From"] = SMTP_USER
     msg["To"] = ", ".join(EMAIL_TO)
-    msg.set_content(f"UNDISPUTED leaderboard for {today}. Attached.\n\n"
-                    "— Automated by the rep board.")
+    msg.set_content("Leaderboard reflects Tableau, might not reflect current data")
     msg.add_attachment(png.read_bytes(), maintype="image", subtype="png",
                        filename=f"Undisputed_{datetime.now():%Y-%m-%d}.png")
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
