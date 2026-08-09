@@ -358,6 +358,8 @@ def render_board(data: dict) -> Path:
         sys.exit(1)
     (STATS_DIR / "data.json").write_text(json.dumps(data, indent=1))
     log(f"Wrote {STATS_DIR}/data.json")
+    if DRY_RUN:
+        log("DATAJSON " + json.dumps(data, separators=(",", ":")))
 
     server = subprocess.Popen(
         [sys.executable, "-m", "http.server", "8123", "--bind", "127.0.0.1"],
