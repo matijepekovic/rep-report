@@ -80,6 +80,7 @@ FIELD_ALIASES = {
     "closeRate":      ["closerate", "closingrate", "closepct", "closepercent"],
     "grossSplit":     ["grosssplit", "grosssales", "grossvolume", "gross"],
     "netSplit":       ["netsplit", "netsales", "netvolume"],
+    "pendingSplit":   ["pendingsplit", "pending"],
     "dpl":            ["dollarsperlead", "dpl", "perlead"],
     "salesRetention": ["salesretention", "retentionrate", "retention"],
     "avgGrossPerRep": ["avggrossperrep", "averagegrossperrep", "avggross"],
@@ -180,6 +181,16 @@ def fetch_view_csv(s, base, site_id) -> str:
     for pair in [p for p in VIZ_FILTERS.split(";") if "=" in p]:
         k, v = pair.split("=", 1)
         params[f"vf_{k.strip()}"] = v.strip()
+
+    # Prefer the custom view's own data (carries its saved filter state) if
+    # this server version exposes the endpoint; fall back to the underlying
+    # view otherwise.
+    r = s.get(f"{base}/sites/{site_id}/customviews/{cv['id']}/data", params=params)
+    if r.status_code == 200:
+        log(f"Got CUSTOM VIEW data CSV ({len(r.content)//1024} KB)")
+        return r.content.decode("utf-8-sig")
+    log(f"Custom-view data endpoint unavailable ({r.status_code}); "
+        "falling back to underlying view (saved filters may not apply).")
 
     r = s.get(f"{base}/sites/{site_id}/views/{view_id}/data", params=params)
     if r.status_code != 200:
@@ -286,12 +297,14 @@ def rows_to_board(csv_text: str):
         sys.exit(1)
 
     # Recompute rates from summed counts when possible (more accurate than
-    # averaging per-row rates).
+    # averaging per-row rates). DPL = Net Split / Issued Leads.
     for r in rep_list:
         if r.get("issuedLeads") and r.get("pitchedLeads") is not None:
             r["pitchRate"] = r["pitchedLeads"] / r["issuedLeads"]
         if r.get("pitchedLeads") and r.get("soldLeads") is not None:
             r["closeRate"] = r["soldLeads"] / r["pitchedLeads"]
+        if r.get("issuedLeads") and r.get("netSplit") is not None:
+            r["dpl"] = r["netSplit"] / r["issuedLeads"]
 
     if totals is None:
         totals = compute_totals(rep_list)
@@ -319,13 +332,15 @@ def compute_totals(rep_list):
         "soldLeads": total("soldLeads"),
         "grossSplit": total("grossSplit"),
         "netSplit": total("netSplit"),
-        "dpl": mean("dpl"),
+        "pendingSplit": total("pendingSplit"),
         "salesRetention": mean("salesRetention"),
     }
     if t["issuedLeads"] and t["pitchedLeads"]:
         t["pitchRate"] = t["pitchedLeads"] / t["issuedLeads"]
     if t["pitchedLeads"] and t["soldLeads"]:
         t["closeRate"] = t["soldLeads"] / t["pitchedLeads"]
+    if t["issuedLeads"] and t["netSplit"]:
+        t["dpl"] = t["netSplit"] / t["issuedLeads"]
     return t
 
 
