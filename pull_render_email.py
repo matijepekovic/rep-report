@@ -233,7 +233,6 @@ def rows_to_board(csv_text: str):
     # acc[name][field] = [sum, count]; the CSV may hold many rows per rep
     # (lead-level detail), so measures accumulate instead of overwrite.
     acc = {}
-    branches = {}
     order = []
     measure_seen = {}   # raw measure name -> (row count, mapped field)
     n_rows = 0
@@ -245,9 +244,6 @@ def rows_to_board(csv_text: str):
         if name not in acc:
             acc[name] = {}
             order.append(name)
-        bval = (row.get(branch_col) or "").strip() if branch_col else ""
-        if bval and bval.lower() != "all":   # 'All' is a filter artifact, not a branch
-            branches[name] = bval
 
         def feed(field, raw):
             v = clean_number(raw, field in PCT_FIELDS)
@@ -276,9 +272,10 @@ def rows_to_board(csv_text: str):
             log(f"  - '{mname}' x{cnt} -> {field or 'UNMAPPED'}")
 
     # Collapse accumulators: sums for counts/dollars, means for rates & avgs.
+    # Board shows rep name only — no branch.
     reps = {}
     for name in order:
-        rec = {"name": name, "branch": branches.get(name)}
+        rec = {"name": name}
         for field, (total, count) in acc[name].items():
             rec[field] = (total / count) if field in MEAN_FIELDS and count else total
         reps[name] = rec
@@ -349,12 +346,8 @@ def compute_totals(rep_list):
 
 
 def default_range():
-    # The saved view covers the current month (e.g. 8/1 - 8/31).
-    now = datetime.now()
-    first = now.replace(day=1)
-    nxt = (first + timedelta(days=32)).replace(day=1)
-    last = nxt - timedelta(days=1)
-    return f"{first:%b %d} – {last:%b %d, %Y}".upper()
+    # The saved view covers the current month.
+    return f"{datetime.now():%B %Y}".upper()
 
 
 # ---------------------------------------------------------------- Render
