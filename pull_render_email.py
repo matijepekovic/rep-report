@@ -242,6 +242,7 @@ def rows_to_board(csv_text: str):
     acc = {}
     order = []
     measure_seen = {}   # raw measure name -> (row count, mapped field)
+    raw_seen = {}       # dry-run diagnostic: field -> rep -> raw value strings
     n_rows = 0
     for row in reader:
         n_rows += 1
@@ -266,6 +267,9 @@ def rows_to_board(csv_text: str):
             cnt, _ = measure_seen.get(mname, (0, field))
             measure_seen[mname] = (cnt + 1, field)
             if field:
+                if DRY_RUN and field in ("soldLeads", "issuedLeads", "pitchedLeads"):
+                    raw_seen.setdefault(field, {}).setdefault(name, []).append(
+                        str(row.get(mv_col)).strip())
                 feed(field, row.get(mv_col))
         else:
             for h, n in hmap.items():
@@ -277,6 +281,9 @@ def rows_to_board(csv_text: str):
         log(f"{n_rows} rows. Distinct Measure Names -> mapped field:")
         for mname, (cnt, field) in sorted(measure_seen.items()):
             log(f"  - '{mname}' x{cnt} -> {field or 'UNMAPPED'}")
+        for field, per_rep in sorted(raw_seen.items()):
+            for rep, vals in sorted(per_rep.items()):
+                log(f"  RAW {field} {rep}: {vals}")
 
     # Collapse accumulators: sums for counts/dollars, means for rates & avgs.
     # Raw lead-level sums are divided by SPLIT_DIVISOR to match the Sales
