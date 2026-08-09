@@ -239,10 +239,15 @@ def rows_to_board(csv_text: str):
 
     # acc[name][field] = [sum, count]; the CSV holds many rows per rep
     # (lead-level detail), so measures accumulate instead of overwrite.
-    acc = {}
+    # The export interleaves per-lead split rows WITH each rep's Total row
+    # (LEAD-Id is blank on it). Those Total rows are the Sales Rep Totals
+    # themselves, so they are the numbers used; per-lead rows only feed the
+    # divisor fallback in case a rep has no Total row.
+    lead_col = next((h for h, n in hmap.items() if n == "leadid"), None)
+    acc = {}        # per-lead rows:   name -> field -> [sum, count]
+    acc_tot = {}    # per-rep totals:  name -> field -> [sum, count]
     order = []
     measure_seen = {}   # raw measure name -> (row count, mapped field)
-    raw_seen = {}       # dry-run diagnostic: field -> rep -> raw value strings
     n_rows = 0
     for row in reader:
         n_rows += 1
@@ -251,13 +256,18 @@ def rows_to_board(csv_text: str):
             continue
         if name not in acc:
             acc[name] = {}
+            acc_tot[name] = {}
             order.append(name)
+
+        is_total_row = long_fmt and lead_col is not None \
+            and not (row.get(lead_col) or "").strip()
 
         def feed(field, raw):
             v = clean_number(raw, field in PCT_FIELDS)
             if v is None:
                 return
-            s = acc[name].setdefault(field, [0.0, 0])
+            bucket = acc_tot[name] if is_total_row else acc[name]
+            s = bucket.setdefault(field, [0.0, 0])
             s[0] += v
             s[1] += 1
 
@@ -267,9 +277,6 @@ def rows_to_board(csv_text: str):
             cnt, _ = measure_seen.get(mname, (0, field))
             measure_seen[mname] = (cnt + 1, field)
             if field:
-                if DRY_RUN and field in ("soldLeads", "issuedLeads", "pitchedLeads"):
-                    raw_seen.setdefault(field, {}).setdefault(name, []).append(
-                        str(row.get(mv_col)).strip())
                 feed(field, row.get(mv_col))
         else:
             for h, n in hmap.items():
@@ -281,25 +288,29 @@ def rows_to_board(csv_text: str):
         log(f"{n_rows} rows. Distinct Measure Names -> mapped field:")
         for mname, (cnt, field) in sorted(measure_seen.items()):
             log(f"  - '{mname}' x{cnt} -> {field or 'UNMAPPED'}")
-        for field, per_rep in sorted(raw_seen.items()):
-            for rep, vals in sorted(per_rep.items()):
-                log(f"  RAW {field} {rep}: {vals}")
 
-    # Collapse accumulators: sums for counts/dollars, means for rates & avgs.
-    # Raw lead-level sums are divided by SPLIT_DIVISOR to match the Sales
-    # Rep Totals table. Board shows rep name only — no branch.
-    scale = SPLIT_DIVISOR if (long_fmt and SPLIT_DIVISOR) else 1.0
-    if scale != 1.0:
-        log(f"Applying split divisor {scale} to summed measures.")
+    # Collapse: prefer the rep's Total-row value; fall back to per-lead sum
+    # divided by SPLIT_DIVISOR. Board shows rep name only — no branch.
+    n_from_total = n_from_leads = 0
     reps = {}
     for name in order:
         rec = {"name": name}
-        for field, (total, count) in acc[name].items():
-            if field in MEAN_FIELDS and count:
-                rec[field] = total / count
+        for field in set(acc[name]) | set(acc_tot[name]):
+            if field in acc_tot[name]:
+                total, count = acc_tot[name][field]
+                rec[field] = (total / count) if field in MEAN_FIELDS and count else total
+                n_from_total += 1
             else:
-                rec[field] = total / scale
+                total, count = acc[name][field]
+                if field in MEAN_FIELDS and count:
+                    rec[field] = total / count
+                else:
+                    rec[field] = total / (SPLIT_DIVISOR or 1.0)
+                n_from_leads += 1
         reps[name] = rec
+    if long_fmt:
+        log(f"Values from Total rows: {n_from_total}; "
+            f"from lead rows (divisor fallback): {n_from_leads}")
 
     # Split out a totals row if Tableau included one
     totals = None
