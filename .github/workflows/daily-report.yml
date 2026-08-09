@@ -5,12 +5,17 @@ on:
     # GitHub cron is UTC. 14:00 UTC = 7:00 AM Pacific (PDT).
     # Winter (PST) that becomes 6:00 AM — change to 15 if you care.
     - cron: "0 14 * * 1-5"
-  workflow_dispatch: {}   # adds a "Run workflow" button for manual testing
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no email; just upload the PNG + CSV as artifacts)"
+        type: boolean
+        default: false
 
 jobs:
   send-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -20,7 +25,13 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: Pull PDF and email it
+      - name: Install Chromium for Playwright
+        run: playwright install --with-deps chromium
+
+      - name: Check out the leaderboard page
+        run: git clone --depth 1 -b claude/new-session-bczgqj https://github.com/matijepekovic/STATS stats-board
+
+      - name: Pull data, render board, email PNG
         env:
           TABLEAU_SERVER: ${{ secrets.TABLEAU_SERVER }}
           TABLEAU_SITE: ${{ secrets.TABLEAU_SITE }}
@@ -30,4 +41,16 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: python pull_and_email.py
+          STATS_DIR: stats-board
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: python pull_render_email.py
+
+      - name: Upload artifacts (board + raw CSV)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: board-${{ github.run_number }}
+          path: |
+            board.png
+            view_data.csv
+          if-no-files-found: ignore
