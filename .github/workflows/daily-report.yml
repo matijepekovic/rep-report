@@ -2,9 +2,11 @@ name: Daily Rep Report
 
 on:
   schedule:
-    # GitHub cron is UTC. 14:00 UTC = 7:00 AM Pacific (PDT).
-    # Winter (PST) that becomes 6:00 AM — change to 15 if you care.
-    - cron: "0 14 * * 1-5"
+    # GitHub cron is UTC. 14:07 UTC = 7:07 AM Pacific (PDT).
+    # Off the top of the hour on purpose: minute-0 jobs hit GitHub's most
+    # congested cron slot and get delayed or skipped under load.
+    # Winter (PST) this becomes 6:07 AM — change 14 to 15 if you care.
+    - cron: "7 14 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
