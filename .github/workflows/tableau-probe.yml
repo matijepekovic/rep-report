@@ -1,0 +1,47 @@
+# Temporary. Manual-dispatch only, no schedule, and no SMTP secrets are
+# exposed to it, so it cannot email anything. Delete this file and
+# probe_products.py once the probe has answered.
+name: Tableau Probe (temporary)
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Start date (YYYY-MM-DD). Blank = first of this month."
+        default: ""
+      end:
+        description: "End date (YYYY-MM-DD). Blank = last of this month."
+        default: ""
+      market:
+        description: "Market to pin the result to."
+        default: "Olympia"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # probe_products.py and the helpers it imports need requests and
+      # nothing else. Skipping requirements.txt keeps Playwright and its
+      # browser download out of a run that never renders anything.
+      - run: pip install requests
+
+      - name: Probe Tableau for Close Rate by Product
+        env:
+          TABLEAU_SERVER: ${{ secrets.TABLEAU_SERVER }}
+          TABLEAU_SITE: ${{ secrets.TABLEAU_SITE }}
+          TABLEAU_PAT_NAME: ${{ secrets.TABLEAU_PAT_NAME }}
+          TABLEAU_PAT_SECRET: ${{ secrets.TABLEAU_PAT_SECRET }}
+          PROBE_START: ${{ inputs.start }}
+          PROBE_END: ${{ inputs.end }}
+          PROBE_MARKET: ${{ inputs.market }}
+        run: python probe_products.py
